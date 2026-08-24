@@ -1,0 +1,58 @@
+name: FTS Renewable Heating Tracker
+ 
+# Runs the tracker automatically every day and pushes new matches to
+# Telegram / Slack. Also runnable on demand from the Actions tab.
+on:
+  schedule:
+    # 07:15 UTC daily (~08:15 UK time in winter, 08:15 BST in summer is
+    # 07:15 UTC -> adjust if you want a fixed *local* time year-round).
+    - cron: "15 7 * * *"
+  workflow_dispatch: {}
+ 
+permissions:
+  contents: write   # needed so the workflow can commit the updated dedupe-state file
+ 
+concurrency:
+  group: fts-heating-tracker
+  cancel-in-progress: false
+ 
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+ 
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+ 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+ 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+ 
+      - name: Run tracker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # Optional overrides -- uncomment / edit as needed:
+          # FTS_LOCATION_KEYWORDS: "Manchester,Trafford,Salford,Stockport"
+          # FTS_HEATING_KEYWORDS: "heat pump,district heat,HIU,MVHR,MEP"
+          # FTS_LOOKBACK_HOURS: "26"
+        run: python fts_heating_tracker.py --state-file seen_notices.json
+ 
+      - name: Persist dedupe state back to the repo
+        run: |
+          if [ -n "$(git status --porcelain seen_notices.json)" ]; then
+            git config user.name "fts-heating-tracker-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add seen_notices.json
+            git commit -m "chore: update seen-notices state [skip ci]"
+            git push
+          else
+            echo "No state changes to commit."
+          fi
+ 
