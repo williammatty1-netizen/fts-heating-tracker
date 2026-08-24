@@ -7,7 +7,8 @@ Automated construction-tracking tool for UK renewable heating projects.
  
 Polls the UK Find a Tender Service (FTS) OCDS API for contract notices
 that have been updated recently, filters them for a target location
-(Greater Manchester boroughs by default) combined with heating /
+(a set of North West England postcode areas plus a few city-name
+keywords, both configurable) combined with heating /
 mechanical-engineering keywords, deduplicates against previously-seen
 notices, and pushes a formatted summary of any *new* matches to Telegram
 and/or Slack.
@@ -48,6 +49,15 @@ API_HOST = "www.find-tender.service.gov.uk"
  
 DEFAULT_LOCATION_KEYWORDS = ["Manchester", "Trafford", "Salford", "Stockport"]
 DEFAULT_HEATING_KEYWORDS = ["heat pump", "district heat", "HIU", "MVHR", "MEP"]
+ 
+# Royal Mail postcode AREA codes (the letters before the first digit, e.g.
+# "SK" in "SK3 0SD") covering the target North West England territory.
+# Matched against each notice's actual postcode fields, not free text --
+# see _extract_postcode_area().
+DEFAULT_POSTCODE_AREAS = [
+    "CA", "LA", "FY", "PR", "BB", "BL", "OL", "WN",
+    "L", "M", "WA", "CH", "CW", "SK", "ST", "TF", "LL",
+]
  
 DEFAULT_STATE_FILE = "seen_notices.json"
 DEFAULT_LOOKBACK_HOURS = 26  # a little over 24h so a daily cron never leaves a gap
@@ -250,25 +260,76 @@ def _searchable_text(release: dict[str, Any]) -> str:
     return " \n ".join(p for p in parts if p)
  
  
+def _extract_postcode_area(postcode: Optional[str]) -> Optional[str]:
+    """Return the true postcode AREA (leading letters only, e.g. 'SK' from
+    'SK3 0SD') or None. Anchored so 'M' never accidentally matches 'ML1 1AA'
+    (Motherwell) -- the area is whatever letters precede the first digit."""
+    if not postcode:
+        return None
+    normalised = re.sub(r"\s+", "", postcode.strip().upper())
+    match = re.match(r"^([A-Z]{1,2})\d", normalised)
+    return match.group(1) if match else None
+ 
+ 
+def _extract_all_postcodes(release: dict[str, Any]) -> list[str]:
+    """Every raw postcode string attached to this release: the buyer's
+    address plus any item delivery addresses."""
+    tender = release.get("tender") or {}
+    buyer = _extract_buyer(release)
+    codes: list[str] = []
+ 
+    buyer_postcode = (buyer.get("address") or {}).get("postalCode")
+    if buyer_postcode:
+        codes.append(buyer_postcode)
+ 
+    for item in tender.get("items") or []:
+        for da in item.get("deliveryAddresses") or []:
+            if da.get("postalCode"):
+                codes.append(da["postalCode"])
+ 
+    return codes
+ 
+ 
+def _match_postcode_areas(release: dict[str, Any], target_areas: Optional[set[str]]) -> list[str]:
+    """Which of `target_areas` this release's real postcode(s) fall in."""
+    if not target_areas:
+        return []
+    hits: list[str] = []
+    for raw in _extract_all_postcodes(release):
+        area = _extract_postcode_area(raw)
+        if area and area in target_areas and area not in hits:
+            hits.append(area)
+    return hits
+ 
+ 
 def match_release(
     release: dict[str, Any],
     location_patterns: list[tuple[str, re.Pattern]],
     heating_patterns: list[tuple[str, re.Pattern]],
+    postcode_areas: Optional[set[str]] = None,
 ) -> Optional[tuple[list[str], list[str]]]:
     """Return (matched_location_keywords, matched_heating_keywords) if the
-    release matches at least one keyword from EACH group, else None."""
+    release matches EITHER a location free-text keyword OR a target postcode
+    area, AND at least one heating keyword. Else None.
+ 
+    Postcode areas are checked against the notice's actual postcode fields
+    (never free text) -- short codes like 'M', 'L' or 'ST' would produce
+    false positives if searched for as plain words.
+    """
     text = _searchable_text(release)
     if not text.strip():
         return None
  
-    loc_hits = [kw for kw, pat in location_patterns if pat.search(text)]
-    if not loc_hits:
+    loc_text_hits = [kw for kw, pat in location_patterns if pat.search(text)]
+    loc_postcode_hits = _match_postcode_areas(release, postcode_areas)
+    if not loc_text_hits and not loc_postcode_hits:
         return None
  
     heat_hits = [kw for kw, pat in heating_patterns if pat.search(text)]
     if not heat_hits:
         return None
  
+    loc_hits = loc_text_hits + [f"{area} (postcode)" for area in loc_postcode_hits]
     return loc_hits, heat_hits
  
  
@@ -462,10 +523,7 @@ def notify(
         log.info("No new matches - nothing to notify.")
         return
  
-    header = (
-        f"🔥 {len(matches)} new UK heating/MEP tender match(es) found "
-        f"(Manchester / Trafford / Salford / Stockport)"
-    )
+    header = f"🔥 {len(matches)} new UK heating/MEP tender match(es) found in your target area"
  
     if telegram_token and telegram_chat_id:
         blocks = [format_match_block(m, plain=False) for m in matches]
@@ -519,7 +577,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--location-keywords",
         default=os.environ.get("FTS_LOCATION_KEYWORDS", ",".join(DEFAULT_LOCATION_KEYWORDS)),
-        help="Comma-separated location keywords.",
+        help="Comma-separated location keywords, matched as free text in the "
+        "title/description/buyer name/address.",
+    )
+    parser.add_argument(
+        "--postcode-areas",
+        default=os.environ.get("FTS_POSTCODE_AREAS", ",".join(DEFAULT_POSTCODE_AREAS)),
+        help="Comma-separated Royal Mail postcode AREA codes (e.g. M,SK,WA) "
+        "matched against each notice's actual postcode field(s), not free text.",
     )
     parser.add_argument(
         "--heating-keywords",
@@ -541,6 +606,7 @@ def main(argv: Optional[list[str]] = None) -> int:
  
     location_keywords = [k.strip() for k in args.location_keywords.split(",") if k.strip()]
     heating_keywords = [k.strip() for k in args.heating_keywords.split(",") if k.strip()]
+    postcode_areas = {a.strip().upper() for a in args.postcode_areas.split(",") if a.strip()}
     location_patterns = _compile_keyword_patterns(location_keywords)
     heating_patterns = _compile_keyword_patterns(heating_keywords)
  
@@ -555,10 +621,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     updated_from = now - timedelta(hours=args.lookback_hours)
  
     log.info(
-        "Querying FTS for updates between %s and %s (location=%s, heating=%s)",
+        "Querying FTS for updates between %s and %s (location_keywords=%s, "
+        "postcode_areas=%s, heating=%s)",
         updated_from.isoformat(),
         now.isoformat(),
         location_keywords,
+        sorted(postcode_areas),
         heating_keywords,
     )
  
@@ -574,7 +642,7 @@ def main(argv: Optional[list[str]] = None) -> int:
  
     matches: list[Match] = []
     for release in releases:
-        hit = match_release(release, location_patterns, heating_patterns)
+        hit = match_release(release, location_patterns, heating_patterns, postcode_areas)
         if hit:
             loc_hits, heat_hits = hit
             matches.append(build_match(release, loc_hits, heat_hits))
