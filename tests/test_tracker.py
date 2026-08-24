@@ -23,7 +23,11 @@ def _release(
     region="Greater Manchester",
     release_id="r1",
     buyer_name="Manchester City Council",
+    postcode=None,
 ):
+    address = {"locality": locality, "region": region}
+    if postcode:
+        address["postalCode"] = postcode
     return {
         "ocid": ocid,
         "id": release_id,
@@ -35,7 +39,7 @@ def _release(
                 "id": "b1",
                 "name": buyer_name,
                 "roles": ["buyer"],
-                "address": {"locality": locality, "region": region},
+                "address": address,
             }
         ],
         "tender": {
@@ -81,6 +85,46 @@ def test_match_requires_both_location_and_heating():
  
     wrong_topic = _release("ocds-aaa-3", "Grounds maintenance contract, Salford parks")
     assert tr.match_release(wrong_topic, loc, heat) is None
+ 
+ 
+def test_postcode_area_extraction_avoids_ml_vs_m_confusion():
+    # "M" (Manchester) must not accidentally match "ML1 1AA" (Motherwell).
+    assert tr._extract_postcode_area("M1 4WP") == "M"
+    assert tr._extract_postcode_area("ML1 1AA") == "ML"
+    assert tr._extract_postcode_area("SK3 0SD") == "SK"
+    assert tr._extract_postcode_area("") is None
+    assert tr._extract_postcode_area(None) is None
+ 
+ 
+def test_postcode_area_matching_independent_of_free_text_keywords():
+    """A buyer in Wigan (WN) with no 'Manchester/Trafford/Salford/Stockport'
+    text anywhere should still match via the postcode-area list, and a
+    postcode outside the target areas should not."""
+    loc = tr._compile_keyword_patterns(tr.DEFAULT_LOCATION_KEYWORDS)
+    heat = tr._compile_keyword_patterns(tr.DEFAULT_HEATING_KEYWORDS)
+    areas = set(tr.DEFAULT_POSTCODE_AREAS)
+ 
+    in_area = _release(
+        "ocds-pc-1",
+        "HIU installation, community centre refurbishment",
+        locality="Wigan", region="North West England", buyer_name="Wigan Council",
+        postcode="WN1 1AB",
+    )
+    hit = tr.match_release(in_area, loc, heat, postcode_areas=areas)
+    assert hit is not None
+    loc_hits, heat_hits = hit
+    assert any("WN" in h for h in loc_hits)
+ 
+    out_of_area = _release(
+        "ocds-pc-2",
+        "HIU installation, community centre refurbishment",
+        locality="Motherwell", region="North Lanarkshire", buyer_name="North Lanarkshire Council",
+        postcode="ML1 1AA",
+    )
+    assert tr.match_release(out_of_area, loc, heat, postcode_areas=areas) is None
+ 
+    # Without any postcode_areas passed, behaviour is unchanged (back-compat).
+    assert tr.match_release(in_area, loc, heat) is None
  
  
 def test_dedupe_across_runs(tmp_path):
