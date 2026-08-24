@@ -80,7 +80,8 @@ Configuration reference
 All of these are optional; sensible defaults are baked in.
 
 Env var / flag	Default	Meaning
-FTS_LOCATION_KEYWORDS / --location-keywords	Manchester,Trafford,Salford,Stockport	Comma-separated location keywords (any one must match)
+FTS_LOCATION_KEYWORDS / --location-keywords	Manchester,Trafford,Salford,Stockport	Comma-separated location keywords, matched as free text anywhere in the notice (any one must match)
+FTS_POSTCODE_AREAS / --postcode-areas	CA,LA,FY,PR,BB,BL,OL,WN,L,M,WA,CH,CW,SK,ST,TF,LL	Comma-separated Royal Mail postcode AREA codes (the letters before the first digit, e.g. SK in SK3 0SD). Matched against each notice's actual postcode field(s), never free text — short codes like M, L, ST would be far too noisy to text-search for. A notice matches location if it matches either this or FTS_LOCATION_KEYWORDS.
 FTS_HEATING_KEYWORDS / --heating-keywords	heat pump,district heat,HIU,MVHR,MEP	Comma-separated heating/MEP keywords (any one must match)
 FTS_LOOKBACK_HOURS / --lookback-hours	26	How far back to query updatedFrom. Kept slightly over 24h so a daily cron never leaves a gap even if a run is late.
 FTS_STATE_FILE / --state-file	seen_notices.json	Dedupe state file path
@@ -88,10 +89,10 @@ FTS_DRY_RUN / --dry-run	off	Log what would be sent without calling Telegram/Slac
 LOG_LEVEL	INFO	Set to DEBUG for verbose request/pagination logs
 How matching works
 
-A notice is reported only if both conditions hold:
+A notice is reported only if both of these hold:
 
-At least one location keyword appears in the notice's title, description, buyer name, buyer address, item descriptions, lot details, or delivery addresses.
-At least one heating keyword appears in that same text.
+Location — either (a) at least one FTS_LOCATION_KEYWORDS entry appears as free text in the notice's title, description, buyer name, buyer address, item descriptions, lot details, or delivery addresses, or (b) the notice's actual postcode (buyer address or a delivery address) falls in one of the FTS_POSTCODE_AREAS codes. Only (a) is ever text-searched — postcodes are matched properly against the postcode field itself, so a short area code like M can't accidentally match unrelated words.
+Heating/MEP — at least one FTS_HEATING_KEYWORDS entry appears as free text.
 
 Matching is case-insensitive and word-bounded (so MEP won't accidentally match inside an unrelated word). A notice already recorded in seen_notices.json (keyed by its OCDS ocid, i.e. the whole procurement process) is never re-sent, even if FTS returns it again on a later day because it was updated (e.g. moved from "tender" to "award" stage).
 
