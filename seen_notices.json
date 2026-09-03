@@ -1,3 +1,14 @@
 {
-  "seen_ocids": {}
+  "seen_ocids": {
+    "ocds-h6vhtk-051539": {
+      "first_seen": "2026-09-03T07:24:43.735239+00:00",
+      "stage": "tender",
+      "title": "Technical Support Services 2026"
+    },
+    "ocds-h6vhtk-06f024": {
+      "first_seen": "2026-09-03T07:24:43.735239+00:00",
+      "stage": "award",
+      "title": "RLI Pharmacy Robot Refurbishment"
+    }
+  }
 }
